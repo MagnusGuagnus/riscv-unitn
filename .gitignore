@@ -1,0 +1,118 @@
+# ----------------------------------------------------------------------------
+# .gitignore per progetto VHDL / Vivado
+# Esclude tutto il contenuto auto-generato da Vivado, tiene solo i sorgenti.
+# ----------------------------------------------------------------------------
+
+# ============================================================================
+# VIVADO: cartelle del progetto generate automaticamente
+# Sono pesanti, cambiano ad ogni Run Synthesis/Implementation, e si possono
+# rigenerare dal progetto .xpr. Inutile versionarle.
+# ============================================================================
+RISC-V/RISC-V.cache/
+RISC-V/RISC-V.runs/
+RISC-V/RISC-V.sim/
+RISC-V/RISC-V.hw/
+RISC-V/RISC-V.ip_user_files/
+RISC-V/RISC-V.gen/
+RISC-V/RISC-V.srcs/utils_1/
+
+# In via generale (se cambi nome al progetto Vivado)
+**/*.cache/
+**/*.runs/
+**/*.hw/
+**/*.ip_user_files/
+**/*.gen/
+
+# ============================================================================
+# VIVADO: file di journal/log/temp creati durante l'esecuzione
+# ============================================================================
+*.jou
+*.log
+*.str
+*.pb
+*.wdb
+*.wcfg.bak
+
+# Backup automatici di Vivado
+*.backup.jou
+*.backup.log
+vivado_*.backup.jou
+vivado_*.backup.log
+vivado.jou
+vivado.log
+
+# WebTalk e usage statistics
+webtalk*
+usage_statistics_webtalk.*
+hs_err_pid*
+
+# Cartella nascosta di Vivado per file temporanei di sintesi
+.Xil/
+
+# ============================================================================
+# OUTPUTS: bitstream, checkpoint, debug probe
+# Sono il prodotto della build, non sorgenti. Rigenerabili.
+# ============================================================================
+*.bit
+*.bin
+*.dcp
+*.ltx
+*.bif
+*.bmm
+
+# ============================================================================
+# SIMULAZIONE: log di xsim e snapshot
+# ============================================================================
+xsim.dir/
+xvhdl.log
+xvhdl.pb
+xvlog.log
+xvlog.pb
+xsim*.log
+
+# ============================================================================
+# EDITOR: file di configurazione di editor/IDE locali
+# Ogni utente ha la sua configurazione, non versionarla
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================================================================
+# OS-specific: file generati da Windows/macOS
+# ============================================================================
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ============================================================================
+# COMPILATI temporanei generici
+# ============================================================================
+*.o
+*.obj
+*.exe
+*.out
+
+# ============================================================================
+# NB su cosa NON e' escluso (e VERRA' versionato):
+# - README.md
+# - docs/                   (documentazione)
+# - src/                    (sorgenti VHDL)
+# - sim/                    (testbench VHDL)
+# - constraints/            (file .xdc)
+# - sw/                     (programmi assembly e linker script)
+# - email_proposta_progetto.md
+# - .gitignore (questo file)
+#
+# Il file di progetto Vivado RISC-V/RISC-V.xpr e' anch'esso escluso (perche'
+# rientra in RISC-V/RISC-V.cache implicitamente?). In realta' no: RISC-V.xpr
+# sta fuori dalle cartelle escluse, quindi VIENE versionato. Se non vuoi
+# versionarlo (e' un XML grande e cambia spesso), aggiungi:
+#   RISC-V/RISC-V.xpr
+# qui sotto. Lascia commentato se preferisci tenerlo (utile per riaprire il
+# progetto su altra macchina senza ricrearlo da zero).
+# ============================================================================
+
+# RISC-V/RISC-V.xpr    # decommentare per escludere il project file Vivado
