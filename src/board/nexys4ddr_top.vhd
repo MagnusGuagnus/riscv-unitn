@@ -120,37 +120,86 @@ architecture Behavioral of nexys4ddr_top is
     -- Segnale interno: reset attivo-alto da passare a cpu_top
     signal reset_int : std_logic;
 
+    -- ----------------------------------------------------------------
+    -- PROBE FASE 3 DEBUG
+    -- Intercettiamo uart_tx_pin su un segnale interno cosi' possiamo
+    -- osservarlo senza modificare nulla dentro cpu_top/memory_map.
+    -- ----------------------------------------------------------------
+    -- Copia interna del segnale TX (cpu_top lo scrive qui, noi lo
+    -- portiamo al pin esterno E al latch di probe).
+    signal uart_tx_int  : std_logic;
+
+    -- LED bus intermedio: cpu_top scrive qui, noi passiamo [14:0]
+    -- all'uscita e sovrascriviamo il bit 15 con il probe.
+    signal led_internal : std_logic_vector(15 downto 0);
+
+    -- Latch del probe: va a '1' non appena uart_tx_int scende a '0'
+    -- e resta '1' per sempre (fino al prossimo reset).
+    -- Dopo l'esecuzione di PROGRAM_C, il valore finale di led_out[15]
+    -- dice:
+    --   '1' → la UART ha trasmesso (TX e' andata a 0 almeno una volta)
+    --   '0' → uart_tx_start non e' mai stato asserito in hardware
+    signal tx_ever_low  : std_logic := '0';
+
 begin
 
     --------------------------------------------------------------------
     -- Inversione di polarita' del reset.
-    -- Una sola NOT, un solo posto: tutto il resto del design vede
-    -- un reset attivo-alto "tradizionale".
     --------------------------------------------------------------------
     reset_int <= not cpu_resetn;
 
     --------------------------------------------------------------------
-    -- Istanza della CPU.
-    -- Generic forzati per la configurazione di demo su scheda:
-    --   - CLK_HZ = 100_000_000 : si propaga al divisore baud della UART
-    --   - BAUD   = 115_200     : standard PuTTY/TeraTerm
-    --   - PROGRAM_SEL = 1      : carica in IMEM il programma Hello World
-    --
-    -- Le 6 porte di debug (dbg_*) sono lasciate "open" perche' qui non
-    -- servono e in sintesi richiederebbero pin fisici che non abbiamo.
-    -- Vivado elimina la logica associata in fase di optimization.
+    -- Probe latch: campiona uart_tx_int ad ogni rising_edge.
+    -- Condizione: uart_tx_int = '0' → la linea TX ha emesso uno start bit
+    -- (o qualsiasi bit basso). Una volta che si accende non si spegne.
     --------------------------------------------------------------------
-    u_cpu: entity work.cpu_top
+    probe_latch: process(clk)
+    begin
+        if rising_edge(clk) then
+            if reset_int = '1' then
+                tx_ever_low <= '0';
+            elsif uart_tx_int = '0' then
+                tx_ever_low <= '1';
+            end if;
+        end if;
+    end process;
+
+    -- TX va al pin esterno D4 normalmente
+    uart_tx_pin <= uart_tx_int;
+
+    -- LED[14:0] passano dalla CPU; LED[15] e' il probe
+    led_out(14 downto 0) <= led_internal(14 downto 0);
+    led_out(15)          <= tx_ever_low;
+
+    --------------------------------------------------------------------
+    -- Istanza della CPU.
+    -- PROGRAM_SEL = 2 → PROGRAM_C (debug single-shot 'X'):
+    --   istr 0: lw  x12, 8(x0)   x12 = &GPIO_LED
+    --   istr 1: addi x6, x0, 170  x6  = 0xAA
+    --   istr 2: sw  x6, 0(x12)   LED <= 0xAA  (probe 1: CPU viva)
+    --   istr 3: lw  x10, 0(x0)   x10 = &UART_DATA
+    --   istr 4: addi x5, x0, 88  x5  = 'X'
+    --   istr 5: sw  x5, 0(x10)   UART_DATA <= 'X'  (kick UART)
+    --   istr 6: addi x6, x0, 17  x6  = 0x11
+    --   istr 7: sw  x6, 0(x12)   LED <= 0x11  (probe 2: sw eseguita)
+    --   istr 8: jal x0, 0        halt
+    --
+    -- Interpretazione finale LED:
+    --   LED[14:0] = 0x0011  (probe 2 riuscito) sempre se CPU gira
+    --   LED[15]   = '1'     se uart_tx_pin e' mai scesa a '0' → UART ha sparato
+    --   LED[15]   = '0'     se uart_tx_pin non e' mai scesa   → uart_tx_start non arriva
+    --------------------------------------------------------------------
+    u_cpu: entity work.cpu_top_pipelined
         generic map (
             CLK_HZ      => 100_000_000,
             BAUD        =>     115_200,
-            PROGRAM_SEL =>           1
+            PROGRAM_SEL =>           3
         )
         port map (
             clk            => clk,
             reset          => reset_int,
-            uart_tx_pin    => uart_tx_pin,
-            led_out        => led_out,
+            uart_tx_pin    => uart_tx_int,
+            led_out        => led_internal,
             sw_in          => sw_in,
             dbg_pc         => open,
             dbg_instr      => open,

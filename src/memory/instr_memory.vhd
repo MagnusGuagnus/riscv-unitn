@@ -157,8 +157,90 @@ architecture Behavioral of instr_memory is
     );
 
     --------------------------------------------------------------------
+    -- PROGRAM D (PROGRAM_SEL = 3) — DEBUG senza DMEM[0]: calcola &UART_DATA
+    -- da x12 (= &GPIO_LED = 0x00010008) con addi x10, x12, -8.
+    -- Bypassa completamente DMEM[0] per isolare il bug di inizializzazione.
+    --
+    -- Se con PROGRAM_C LED15='0' (uart_tx_start non scatta):
+    --   PROGRAM_D rimuove la lw x10, 0(x0) e usa addi x10, x12, -8.
+    --   Se LED15 diventa '1' → DMEM[0] non è inizializzato in HW.
+    --   Se LED15 resta '0'   → il problema è altrove.
+    --
+    --   0: lw   x12, 8(x0)      0x00802603  x12 = DMEM[2] = 0x00010008 (&GPIO_LED)
+    --   1: addi x6, x0, 170     0x0AA00313  x6  = 0xAA
+    --   2: sw   x6, 0(x12)      0x00662023  LED <= 0xAA  (probe 1)
+    --   3: addi x10, x12, -8    0xFF860513  x10 = x12 - 8 = 0x00010000 (&UART_DATA)
+    --   4: addi x5, x0, 88      0x05800293  x5  = 'X' = 0x58
+    --   5: sw   x5, 0(x10)      0x00552023  UART_DATA <= 'X'  (kick UART)
+    --   6: addi x6, x0, 17      0x01100313  x6  = 0x11
+    --   7: sw   x6, 0(x12)      0x00662023  LED <= 0x11  (probe 2)
+    --   8: jal  x0, 0           0x0000006F  halt
+    --------------------------------------------------------------------
+    constant PROGRAM_D : rom_t := (
+        0 => x"00802603",   -- lw   x12, 8(x0)      x12 = &GPIO_LED
+        1 => x"0AA00313",   -- addi x6, x0, 170     x6  = 0xAA
+        2 => x"00662023",   -- sw   x6, 0(x12)      LED <= 0xAA  (probe 1)
+        3 => x"FF860513",   -- addi x10, x12, -8    x10 = 0x00010000  (NO lw da DMEM[0]!)
+        4 => x"05800293",   -- addi x5, x0, 88      x5  = 'X'
+        5 => x"00552023",   -- sw   x5, 0(x10)      kick UART
+        6 => x"01100313",   -- addi x6, x0, 17      x6  = 0x11
+        7 => x"00662023",   -- sw   x6, 0(x12)      LED <= 0x11  (probe 2)
+        8 => x"0000006F",   -- jal  x0, 0           halt
+        others => x"00000013"
+    );
+
+    --------------------------------------------------------------------
+    -- PROGRAM E (PROGRAM_SEL = 4) — HAZARD TEST per la pipeline a 5 stadi.
+    -- Test auto-verificante: esercita forwarding, load-use stall, branch
+    -- condizionale (preso E non preso) e jal con link (rd != x0), poi scrive
+    -- una "firma" su GPIO_LED. La firma e' corretta SOLO se tutti gli hazard
+    -- si comportano bene.
+    --
+    --   Firma attesa su led_out = 0x004F (= 79 = 30 + 5 + 44).
+    --   PC finale fermo a 0x040 (jal self-loop alla istr 16).
+    --
+    --   0  addi x1,x0,10     x1=10
+    --   1  addi x2,x0,20     x2=20
+    --   2  add  x3,x1,x2     x3=30        forwarding (x1 da MEM/WB, x2 da EX/MEM)
+    --   3  sw   x3,12(x0)    DMEM[3]=30   forwarding di x3
+    --   4  lw   x4,12(x0)    x4=30        (load)
+    --   5  add  x6,x4,x0     x6=30        LOAD-USE -> stall di 1 ciclo
+    --   6  beq  x4,x3,+8     30==30 PRESO -> salta istr 7
+    --   7  addi x6,x0,255    canarino (deve essere SALTATA)
+    --   8  bne  x4,x3,+8     30!=30 falso -> NON preso
+    --   9  addi x7,x0,5      x7=5 (deve ESEGUIRE)
+    --  10  jal  x8,+8        x8=PC+4=44, salta istr 11 (link rd!=x0)
+    --  11  addi x7,x0,238    canarino (deve essere SALTATA)
+    --  12  lw   x12,8(x0)    x12 = &GPIO_LED = 0x00010008
+    --  13  add  x5,x6,x7     x5 = 30+5 = 35
+    --  14  add  x5,x5,x8     x5 = 35+44 = 79 = 0x4F
+    --  15  sw   x5,0(x12)    GPIO_LED <= 0x4F   (firma)
+    --  16  jal  x0,0         halt (self-loop)
+    --------------------------------------------------------------------
+    constant PROGRAM_E : rom_t := (
+         0 => x"00A00093",   -- addi x1,x0,10
+         1 => x"01400113",   -- addi x2,x0,20
+         2 => x"002081B3",   -- add  x3,x1,x2     forwarding x1,x2
+         3 => x"00302623",   -- sw   x3,12(x0)    forwarding x3
+         4 => x"00C02203",   -- lw   x4,12(x0)    load
+         5 => x"00020333",   -- add  x6,x4,x0     LOAD-USE -> stall
+         6 => x"00320463",   -- beq  x4,x3,+8     branch PRESO
+         7 => x"0FF00313",   -- addi x6,x0,255    canarino (skip)
+         8 => x"00321463",   -- bne  x4,x3,+8     branch NON preso
+         9 => x"00500393",   -- addi x7,x0,5      esegue
+        10 => x"0080046F",   -- jal  x8,+8        link rd=x8, salta istr 11
+        11 => x"0EE00393",   -- addi x7,x0,238    canarino (skip)
+        12 => x"00802603",   -- lw   x12,8(x0)    &GPIO_LED
+        13 => x"007302B3",   -- add  x5,x6,x7     35
+        14 => x"008282B3",   -- add  x5,x5,x8     79 = 0x4F
+        15 => x"00562023",   -- sw   x5,0(x12)    GPIO_LED <= firma
+        16 => x"0000006F",   -- jal  x0,0         halt
+        others => x"00000013"
+    );
+
+    --------------------------------------------------------------------
     -- Function di selezione del programma a partire dal generic.
-    -- Restituisce uno dei tre programmi precaricati a seconda di PROGRAM_SEL.
+    -- Restituisce uno dei cinque programmi precaricati a seconda di PROGRAM_SEL.
     --------------------------------------------------------------------
     function select_program(sel : integer) return rom_t is
     begin
@@ -166,6 +248,10 @@ architecture Behavioral of instr_memory is
             return PROGRAM_B;
         elsif sel = 2 then
             return PROGRAM_C;
+        elsif sel = 3 then
+            return PROGRAM_D;
+        elsif sel = 4 then
+            return PROGRAM_E;
         else
             return PROGRAM_A;
         end if;

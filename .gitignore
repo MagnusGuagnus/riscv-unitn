@@ -95,10 +95,11 @@ desktop.ini
 *.exe
 *.out
 
+docs
+HANDOVER.md
 # ============================================================================
 # NB su cosa NON e' escluso (e VERRA' versionato):
 # - README.md
-# - docs/                   (documentazione)
 # - src/                    (sorgenti VHDL)
 # - sim/                    (testbench VHDL)
 # - constraints/            (file .xdc)
