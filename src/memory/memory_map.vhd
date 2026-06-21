@@ -1,37 +1,33 @@
 ----------------------------------------------------------------------------------
 -- Module Name: memory_map - Behavioral
--- Description: Bus memory-mapped della CPU multi-cycle.
---   Wrapper che istanzia DMEM + UART_TX + GPIO e fa il routing in base a
---   alcuni bit dell'indirizzo (alu_pre_result).
+-- Description: Bus memory-mapped della CPU. Istanzia DMEM + UART_TX + GPIO e
+--   fa il routing in base ad alcuni bit dell'indirizzo. Usato sia dalla CPU
+--   multi-cycle sia dalla pipeline.
 --
 --   Memory map (autoritativa, da docs/peripherals_overview.md):
---     DMEM        0x0000_0000 – 0x0000_3FFF   (16 kB, BRAM)   bit[16]=0
+--     DMEM        0x0000_0000 - 0x0000_3FFF   (16 kB, BRAM)   bit[16]=0
 --     UART_DATA   0x0001_0000  (W)            bit[16]=1, bit[3]=0, bit[2]=0
---     UART_STATUS 0x0001_0004  (R, bit 0 = ready)             bit[16]=1, bit[3]=0, bit[2]=1
+--     UART_STATUS 0x0001_0004  (R, bit0=ready)               bit[16]=1, bit[3]=0, bit[2]=1
 --     GPIO_LED    0x0001_0008  (W)            bit[16]=1, bit[3]=1, bit[2]=0
 --     GPIO_SW     0x0001_000C  (R)            bit[16]=1, bit[3]=1, bit[2]=1
 --
---   Address decoder (logica combinatoria):
---     sel_periph    = addr[16]   (0=DMEM, 1=periferiche)
---     sel_uart_gpio = addr[3]    (0=UART, 1=GPIO)
---     sel_reg       = addr[2]    (0=data/LED, 1=status/SW)
---
---   Routing del write enable (mutuamente esclusivi per costruzione):
---     dmem_we       = we AND sel_periph='0'
---     uart_tx_start = we AND sel_periph='1' AND sel_uart_gpio='0' AND sel_reg='0'
---     gpio_we       = we AND sel_periph='1' AND sel_uart_gpio='1' AND sel_reg='0'
---
---   Mux di dout (lettura):
---     sel_periph='0'                                → dmem.dout
---     sel_uart_gpio='0' AND sel_reg='1' (UART_STATUS) → bit 0 = NOT uart.tx_busy
---     sel_uart_gpio='1' AND sel_reg='1' (GPIO_SW)     → x"0000" & gpio.sw_value
---     altrimenti                                       → (others => '0')
---
---   Latenza: il modulo presenta la stessa latenza della DMEM (output
---   disponibile 1 ciclo dopo l'indirizzo). Le periferiche sono già
---   registrate internamente (uart_tx_busy e gpio.sw_value vengono da FF),
---   quindi il mux combinatorio è OK: in MEM/WB l'indirizzo è stabile e
---   il dout di lettura è valido.
+--   LATENZA DI LETTURA UNIFORME (1 ciclo) — importante per la pipeline
+--   ================================================================
+--   La DMEM e' BRAM a lettura sincrona: il dato esce 1 ciclo dopo l'indirizzo.
+--   Perche' il modulo abbia UNA sola latenza di lettura, anche il path di
+--   lettura delle periferiche (UART_STATUS / GPIO_SW) e' portato a 1 ciclo:
+--   i selettori d'indirizzo e i valori periferici vengono REGISTRATI di 1
+--   ciclo (snapshot al momento in cui l'indirizzo e' applicato) e usati dal
+--   mux di dout. Conseguenze:
+--     - multi-cycle: l'indirizzo e' stabile 2 cicli (EXECUTE + MEM/WB), quindi
+--       i selettori registrati coincidono con quelli correnti -> comportamento
+--       invariato (Hello World con polling UART_STATUS funziona come prima);
+--     - pipeline: l'indirizzo e' applicato in MEM e il dato e' letto in WB;
+--       cosi' TUTTE le letture (DMEM e periferiche) sono valide insieme in WB,
+--       e usando l'output register della DMEM come registro MEM/WB il dato di
+--       load (e di periferica) arriva al ciclo giusto.
+--   Il WRITE routing resta combinatorio sull'indirizzo CORRENTE: lo store
+--   committa nel ciclo in cui l'indirizzo e' applicato (stadio MEM/EXECUTE).
 ----------------------------------------------------------------------------------
 
 library IEEE;
@@ -40,20 +36,16 @@ use IEEE.NUMERIC_STD.ALL;
 
 entity memory_map is
     generic (
-        -- Propagati alla UART per facilitare la simulazione.
-        -- In synth: 100 MHz / 115200 → BAUD_DIV = 868.
         CLK_HZ : integer := 100_000_000;
         BAUD   : integer := 115_200
     );
     port (
         clk      : in  std_logic;
         reset    : in  std_logic;
-        -- Interfaccia verso la CPU (lato datapath)
         addr     : in  std_logic_vector(31 downto 0);   -- alu_pre_result
-        we       : in  std_logic;                        -- mem_we dalla FSM
+        we       : in  std_logic;                        -- mem_we
         din      : in  std_logic_vector(31 downto 0);    -- rs2_value
         dout     : out std_logic_vector(31 downto 0);    -- mem_out verso il regfile
-        -- Interfaccia verso la scheda (lato pin esterni)
         uart_tx_pin : out std_logic;
         led_out     : out std_logic_vector(15 downto 0);
         sw_in       : in  std_logic_vector(15 downto 0)
@@ -61,40 +53,41 @@ entity memory_map is
 end memory_map;
 
 architecture Behavioral of memory_map is
-    --------------------------------------------------------------------
-    -- Address decoder: selettori derivati da addr (combinatorio)
-    --------------------------------------------------------------------
+    -- Selettori combinatori (per il WRITE routing, sull'indirizzo corrente)
     signal sel_periph    : std_logic;
     signal sel_uart_gpio : std_logic;
     signal sel_reg       : std_logic;
 
-    --------------------------------------------------------------------
+    -- Snapshot REGISTRATO dei selettori (per il READ mux, allineato alla BRAM)
+    signal sel_periph_q    : std_logic := '0';
+    signal sel_uart_gpio_q : std_logic := '0';
+    signal sel_reg_q       : std_logic := '0';
+
     -- Routing del write enable (mutuamente esclusivi)
-    --------------------------------------------------------------------
     signal dmem_we       : std_logic;
     signal uart_tx_start : std_logic;
     signal gpio_we       : std_logic;
 
-    --------------------------------------------------------------------
     -- Segnali interni di interconnessione
-    --------------------------------------------------------------------
     signal dmem_dout     : std_logic_vector(31 downto 0);
     signal uart_tx_busy  : std_logic;
     signal gpio_sw_value : std_logic_vector(15 downto 0);
 
+    -- Valori periferici REGISTRATI di 1 ciclo (snapshot lettura, latenza = DMEM)
+    signal uart_status_q : std_logic := '0';
+    signal gpio_sw_q     : std_logic_vector(15 downto 0) := (others => '0');
 begin
 
     --------------------------------------------------------------------
-    -- 1) Address decoder (3 fili)
+    -- 1) Address decoder combinatorio (usato per il WRITE routing)
     --------------------------------------------------------------------
     sel_periph    <= addr(16);
     sel_uart_gpio <= addr(3);
     sel_reg       <= addr(2);
 
     --------------------------------------------------------------------
-    -- 2) Distribuzione del write enable.
-    --   Per costruzione, al massimo uno di questi 3 segnali è '1' in
-    --   qualsiasi istante.
+    -- 2) Distribuzione del write enable (sull'indirizzo corrente).
+    --   Al massimo uno di questi 3 e' '1' in un dato ciclo.
     --------------------------------------------------------------------
     dmem_we <= we when sel_periph = '0' else '0';
 
@@ -107,8 +100,7 @@ begin
                     and sel_reg       = '0') else '0';
 
     --------------------------------------------------------------------
-    -- 3) Istanziazione DMEM
-    --   Indirizzo word-level: bit [13:2] di addr (= 12 bit = 4096 word).
+    -- 3) DMEM (lettura sincrona: dout 1 ciclo dopo l'indirizzo)
     --------------------------------------------------------------------
     u_dmem: entity work.data_memory
         port map (
@@ -120,15 +112,10 @@ begin
         );
 
     --------------------------------------------------------------------
-    -- 4) Istanziazione UART TX
-    --   tx_data prende gli 8 bit bassi di din (rs2_value[7:0]).
-    --   tx_start è un impulso di 1 ciclo quando la CPU fa "sw" su UART_DATA.
+    -- 4) UART TX
     --------------------------------------------------------------------
     u_uart: entity work.uart_tx
-        generic map (
-            CLK_HZ => CLK_HZ,
-            BAUD   => BAUD
-        )
+        generic map ( CLK_HZ => CLK_HZ, BAUD => BAUD )
         port map (
             clk      => clk,
             reset    => reset,
@@ -139,10 +126,7 @@ begin
         );
 
     --------------------------------------------------------------------
-    -- 5) Istanziazione GPIO
-    --   din prende i 16 bit bassi di rs2_value (i LED sono 16 bit).
-    --   sw_in viene dai pin fisici della scheda (passa attraverso il
-    --   synchronizer 2-stadi interno al modulo gpio).
+    -- 5) GPIO
     --------------------------------------------------------------------
     u_gpio: entity work.gpio
         port map (
@@ -156,22 +140,42 @@ begin
         );
 
     --------------------------------------------------------------------
-    -- 6) Mux di dout (read path)
-    --   Restituisce alla CPU il dato letto dalla "regione" indirizzata.
-    --   UART_STATUS: bit 0 = '1' se UART pronta a trasmettere
-    --                       = '0' se UART occupata
-    --                Si usa NOT uart_tx_busy.
-    --                Gli altri 31 bit alti sono zero.
-    --   GPIO_SW    : zero-extension a 32 bit del valore sincronizzato
-    --                degli switch.
-    --   Altri indirizzi non mappati ritornano zero.
+    -- 6) Snapshot di lettura REGISTRATO.
+    --   Registra di 1 ciclo i selettori e i valori periferici, cosi' il mux
+    --   di dout (sotto) ha la stessa latenza della DMEM (1 ciclo). E' cio'
+    --   che permette alla pipeline di leggere le periferiche in WB col valore
+    --   corretto, senza che il multi-cycle (indirizzo stabile) cambi.
+    --------------------------------------------------------------------
+    process(clk)
+    begin
+        if rising_edge(clk) then
+            if reset = '1' then
+                sel_periph_q    <= '0';
+                sel_uart_gpio_q <= '0';
+                sel_reg_q       <= '0';
+                uart_status_q   <= '0';
+                gpio_sw_q       <= (others => '0');
+            else
+                sel_periph_q    <= sel_periph;
+                sel_uart_gpio_q <= sel_uart_gpio;
+                sel_reg_q       <= sel_reg;
+                uart_status_q   <= not uart_tx_busy;   -- bit0 = ready
+                gpio_sw_q       <= gpio_sw_value;
+            end if;
+        end if;
+    end process;
+
+    --------------------------------------------------------------------
+    -- 7) Mux di dout (read path) — tutto a latenza 1 ciclo, selettori
+    --   registrati. DMEM gia' registrata internamente; periferiche
+    --   registrate al punto 6.
     --------------------------------------------------------------------
     dout <= dmem_dout
-              when sel_periph = '0'
-       else (31 downto 1 => '0') & (not uart_tx_busy)
-              when (sel_periph = '1' and sel_uart_gpio = '0' and sel_reg = '1')
-       else x"0000" & gpio_sw_value
-              when (sel_periph = '1' and sel_uart_gpio = '1' and sel_reg = '1')
+              when sel_periph_q = '0'
+       else (31 downto 1 => '0') & uart_status_q
+              when (sel_periph_q = '1' and sel_uart_gpio_q = '0' and sel_reg_q = '1')
+       else x"0000" & gpio_sw_q
+              when (sel_periph_q = '1' and sel_uart_gpio_q = '1' and sel_reg_q = '1')
        else (others => '0');
 
 end Behavioral;

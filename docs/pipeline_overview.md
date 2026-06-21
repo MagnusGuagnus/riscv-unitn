@@ -329,7 +329,7 @@ Domande probabili e risposte:
 | A — Core multi-cycle | Completata | 9 moduli VHDL, simulazione OK |
 | B — Periferiche UART + GPIO | Completata | Hello World OK in xsim |
 | 3 — Bring-up su scheda | Parziale | Bitstream OK, LED arrivano a 0x55 (CPU completa Hello) ma 0 byte arrivano al PC. Test 3 con `uart_test_top` ha dimostrato che la catena hardware UART funziona, quindi il bug è in `sw → uart_tx_start` (vedi `memory/project_phase3_status.md` per i dettagli) |
-| 4 — Pipeline | Simulata e funzionante | Portata in simulazione (GHDL): trovati e corretti 4 bug da latenza BRAM + regfile write-first, e refactor "BRAM come registri di pipeline" (4 register canonici). Test auto-verificante `tb_cpu_pipelined_hazard` (PROGRAM_E) PASSA: `led_out=0x004F`. Dettagli in `pipeline_fixes.md`. Aperto: read periferiche in pipeline; conferma in Vivado xsim; bitstream |
+| 4 — Pipeline | Simulata e funzionante | Portata in simulazione (GHDL): corretti 5 bug (latenza BRAM, regfile write-first, read periferiche) + refactor "BRAM come registri di pipeline" (4 register canonici). Test PASS: `tb_cpu_pipelined_hazard` (`led=0x004F`) e `tb_cpu_pipelined_periph` (`led=0x1234`); multi-cycle `tb_cpu_peripherals` non regredito. Dettagli in `pipeline_fixes.md`. Da fare: conferma in Vivado xsim, bitstream |
 | 5 — Report + demo | Da fare | |
 
 ---

@@ -107,11 +107,16 @@ begin
         wait for 250 ns;
 
         ----------------------------------------------------------------
-        -- 3) Verifica stato finale: PC deve essere fermo a 0x014
-        --    (offset 5*4 = 20 = 0x14, indirizzo della JAL self-loop).
+        -- 3) Verifica stato finale: il PC di FETCH oscilla nel self-loop
+        --    della JAL finale (0x014). Con branch risolto in EX, dbg_pc
+        --    (= pc_if) corre avanti a 0x018/0x01C e viene ridiretto a 0x014
+        --    ad ogni giro (penalita' 2 cicli); l'istruzione committata resta
+        --    la JAL a 0x014. Accetto quindi la finestra 0x014..0x01C invece
+        --    di un valore esatto (era un'assunzione errata della prima
+        --    versione del testbench).
         ----------------------------------------------------------------
-        assert dbg_pc = x"014"
-            report "PC dovrebbe essere fermo a 0x014 (loop JAL)"
+        assert (dbg_pc = x"014" or dbg_pc = x"018" or dbg_pc = x"01C")
+            report "PC fuori dal self-loop della JAL finale (atteso 0x014-0x01C)"
             severity error;
 
         report "tb_cpu_pipelined: programma Fase A eseguito su pipeline"

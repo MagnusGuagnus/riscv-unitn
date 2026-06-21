@@ -240,6 +240,28 @@ architecture Behavioral of instr_memory is
     );
 
     --------------------------------------------------------------------
+    -- PROGRAM F (PROGRAM_SEL = 5) — test READ periferico in pipeline.
+    -- Legge GPIO_SW e lo riflette su GPIO_LED (echo switch -> LED). Esercita
+    -- un read memory-mapped di periferica, che richiede la latenza di lettura
+    -- uniforme in memory_map. In testbench: sw_in=0x1234 -> led_out=0x1234.
+    --
+    --   0  lw   x12,8(x0)     x12 = &GPIO_LED = 0x00010008  (una volta)
+    --   1  addi x13,x12,4     x13 = &GPIO_SW  = 0x0001000C  (una volta)
+    --   loop:
+    --   2  lw   x14,0(x13)    x14 = stato switch  (READ periferico)
+    --   3  sw   x14,0(x12)    GPIO_LED <= x14     (load-use su x14 -> stall)
+    --   4  jal  x0,-8         torna a istr 2 (rilegge gli switch -> LED live)
+    --------------------------------------------------------------------
+    constant PROGRAM_F : rom_t := (
+        0 => x"00802603",   -- lw   x12, 8(x0)
+        1 => x"00460693",   -- addi x13, x12, 4
+        2 => x"0006A703",   -- lw   x14, 0(x13)     loop:
+        3 => x"00E62023",   -- sw   x14, 0(x12)
+        4 => x"FF9FF06F",   -- jal  x0, -8          -> torna a istr 2
+        others => x"00000013"
+    );
+
+    --------------------------------------------------------------------
     -- Function di selezione del programma a partire dal generic.
     -- Restituisce uno dei cinque programmi precaricati a seconda di PROGRAM_SEL.
     --------------------------------------------------------------------
@@ -253,6 +275,8 @@ architecture Behavioral of instr_memory is
             return PROGRAM_D;
         elsif sel = 4 then
             return PROGRAM_E;
+        elsif sel = 5 then
+            return PROGRAM_F;
         else
             return PROGRAM_A;
         end if;

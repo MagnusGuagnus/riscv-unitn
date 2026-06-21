@@ -149,51 +149,50 @@ begin
     reset_int <= not cpu_resetn;
 
     --------------------------------------------------------------------
-    -- Probe latch: campiona uart_tx_int ad ogni rising_edge.
-    -- Condizione: uart_tx_int = '0' → la linea TX ha emesso uno start bit
-    -- (o qualsiasi bit basso). Una volta che si accende non si spegne.
+    -- TEST SWITCH-ECHO (PROGRAM_SEL = 5): tutti e 16 i LED sono pilotati
+    -- dalla CPU (PROGRAM_F: lw GPIO_SW -> sw GPIO_LED). Muovendo gli switch
+    -- i LED li seguono. Il probe della Fase 3 e' DISATTIVATO (commentato qui
+    -- sotto): per questo test serve che la CPU piloti anche il LED 15.
     --------------------------------------------------------------------
-    probe_latch: process(clk)
-    begin
-        if rising_edge(clk) then
-            if reset_int = '1' then
-                tx_ever_low <= '0';
-            elsif uart_tx_int = '0' then
-                tx_ever_low <= '1';
-            end if;
-        end if;
-    end process;
+    uart_tx_pin <= uart_tx_int;        -- non usato da PROGRAM_F (resta idle)
+    led_out     <= led_internal;       -- tutti e 16 i LED vengono dalla CPU
 
-    -- TX va al pin esterno D4 normalmente
-    uart_tx_pin <= uart_tx_int;
-
-    -- LED[14:0] passano dalla CPU; LED[15] e' il probe
-    led_out(14 downto 0) <= led_internal(14 downto 0);
-    led_out(15)          <= tx_ever_low;
+    -- ----------------------------------------------------------------
+    -- PROBE FASE 3 (ripristinare quando si torna sul debug UART):
+    -- ----------------------------------------------------------------
+    -- probe_latch: process(clk)
+    -- begin
+    --     if rising_edge(clk) then
+    --         if reset_int = '1' then
+    --             tx_ever_low <= '0';
+    --         elsif uart_tx_int = '0' then
+    --             tx_ever_low <= '1';
+    --         end if;
+    --     end if;
+    -- end process;
+    -- led_out(14 downto 0) <= led_internal(14 downto 0);
+    -- led_out(15)          <= tx_ever_low;
 
     --------------------------------------------------------------------
-    -- Istanza della CPU.
-    -- PROGRAM_SEL = 2 → PROGRAM_C (debug single-shot 'X'):
-    --   istr 0: lw  x12, 8(x0)   x12 = &GPIO_LED
-    --   istr 1: addi x6, x0, 170  x6  = 0xAA
-    --   istr 2: sw  x6, 0(x12)   LED <= 0xAA  (probe 1: CPU viva)
-    --   istr 3: lw  x10, 0(x0)   x10 = &UART_DATA
-    --   istr 4: addi x5, x0, 88  x5  = 'X'
-    --   istr 5: sw  x5, 0(x10)   UART_DATA <= 'X'  (kick UART)
-    --   istr 6: addi x6, x0, 17  x6  = 0x11
-    --   istr 7: sw  x6, 0(x12)   LED <= 0x11  (probe 2: sw eseguita)
-    --   istr 8: jal x0, 0        halt
+    -- Istanza della CPU (pipeline 5-stage).
+    -- PROGRAM_SEL = 5 → PROGRAM_F (echo switch -> LED): test della pipeline
+    -- sulla scheda, solo GPIO, indipendente dal bug UART della Fase 3.
+    --   istr 0: lw   x12, 8(x0)    x12 = &GPIO_LED   (una volta)
+    --   istr 1: addi x13, x12, 4   x13 = &GPIO_SW    (una volta)
+    --   istr 2: lw   x14, 0(x13)   x14 = stato switch   (read periferico)
+    --   istr 3: sw   x14, 0(x12)   GPIO_LED <= switch   (load-use -> stall)
+    --   istr 4: jal  x0, -8        torna a istr 2 (loop: rilegge e aggiorna)
     --
-    -- Interpretazione finale LED:
-    --   LED[14:0] = 0x0011  (probe 2 riuscito) sempre se CPU gira
-    --   LED[15]   = '1'     se uart_tx_pin e' mai scesa a '0' → UART ha sparato
-    --   LED[15]   = '0'     se uart_tx_pin non e' mai scesa   → uart_tx_start non arriva
+    -- Atteso sulla scheda: i 16 LED seguono i 16 switch IN TEMPO REALE
+    -- (il loop rilegge GPIO_SW di continuo). Se succede, la pipeline esegue
+    -- correttamente in hardware (load periferico, store, hazard load-use).
+    -- Premere CPU_RESET dopo il Program Device.
     --------------------------------------------------------------------
     u_cpu: entity work.cpu_top_pipelined
         generic map (
             CLK_HZ      => 100_000_000,
             BAUD        =>     115_200,
-            PROGRAM_SEL =>           3
+            PROGRAM_SEL =>           5
         )
         port map (
             clk            => clk,
