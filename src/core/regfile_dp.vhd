@@ -69,10 +69,15 @@ begin
     --------------------------------------------------------------------
     -- Letture asincrone con bypass x0 -> 0 (hardwired).
     --------------------------------------------------------------------
+    -- Write-FIRST: Necessario perche' le
+    -- letture sono asincrone: senza questo bypass un valore appena caricato e
+    -- riscritto in WB verrebbe letto vecchio dall'istruzione in ID.
     rs1_data <= (others => '0') when rs1_addr = "00000"
+                else wr_data when (we = '1' and wr_addr = rs1_addr)
                 else regs(to_integer(unsigned(rs1_addr)));
 
     rs2_data <= (others => '0') when rs2_addr = "00000"
+                else wr_data when (we = '1' and wr_addr = rs2_addr)
                 else regs(to_integer(unsigned(rs2_addr)));
 
 end Behavioral;

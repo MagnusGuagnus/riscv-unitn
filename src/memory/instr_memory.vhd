@@ -36,7 +36,8 @@ entity instr_memory is
     );
     port (
         clk         : in  std_logic;
-        addr        : in  std_logic_vector(9 downto 0);  -- word address, 10 bit = 1024 word
+        re          : in  std_logic := '1';
+        addr        : in  std_logic_vector(9 downto 0);
         instruction : out std_logic_vector(31 downto 0)
     );
 end instr_memory;
@@ -264,8 +265,9 @@ begin
     process(clk)
     begin
         if rising_edge(clk) then
-            instruction <= mem(to_integer(unsigned(addr)));
+            if re = '1' then
+                instruction <= mem(to_integer(unsigned(addr)));
+            end if;
         end if;
     end process;
-
 end Behavioral;

@@ -50,14 +50,28 @@ Tra ogni coppia di stadi c'è un **pipeline register**, cioè un set di
 flip-flop che congelano allo `rising_edge(clk)` tutti i segnali che servono
 allo stadio successivo. I 4 pipeline register sono:
 
-- **IF/ID** : `pc`, `pc_next`, `instruction`
+- **IF/ID** : `pc`, `pc_next`, `instruction`, `valid`. Nota: l'**istruzione**
+              non sta in un FF dedicato ma nell'**output register della BRAM
+              IMEM** (`instruction_if`), usato come registro di pipeline;
+              qui ci sono solo il PC compagno (`pc_if_q`/`pc_next_q`) e il
+              bit `valid` (per il flush). Vedi nota sotto.
 - **ID/EX** : `pc`, `pc_next`, `rs1_value`, `rs2_value`, `immediate`,
               `rs1_addr`, `rs2_addr`, `rd_addr`, `op_class`, `alu_op`,
               `cond_op`, `a_sel`, `b_sel`
 - **EX/MEM**: `alu_result`, `rs2_value` (per store), `pc_next`, `rd_addr`,
               `op_class`, `regwrite`, `memwrite`
-- **MEM/WB**: `alu_result`, `mem_out`, `pc_next`, `rd_addr`, `op_class`,
-              `regwrite`
+- **MEM/WB**: `alu_result`, `pc_next`, `rd_addr`, `op_class`, `regwrite`.
+              Nota: il **dato di load** non sta qui ma nell'**output register
+              della BRAM DMEM** (`mem_out_mem`), letto live in WB.
+
+> **Le BRAM come registri di pipeline.** IMEM e DMEM sono a lettura sincrona,
+> quindi il loro output e' gia' un registro: lo si usa direttamente come
+> registro IF/ID (lato istruzione) e MEM/WB (lato dato di load), invece di
+> aggiungere FF a valle che creerebbero stadi nascosti. Cio' che la BRAM non
+> porta (PC compagno, bit valid) si registra a parte allineato. Conseguenze:
+> lo stall congela la BRAM con un read-enable (`re = not stall`); il flush
+> usa il bit valid (l'output BRAM non si forza a NOP). Dettagli in
+> `pipeline_fixes.md` e `pipeline_walkthrough.md` (blocchi 1, 2, 10, 11).
 
 Il numero di bit "in flight" nei pipeline register è molto alto (≈ 300 bit
 complessivi), ma sono tutti flip-flop semplici. Vivado li sintetizza
@@ -169,6 +183,11 @@ un'istruzione 2 passi indietro — servono 3 accessi concorrenti.
 Implementazione: lettura asincrona (combinatoria) per `rs1` e `rs2`,
 scrittura sincrona sul `rising_edge`. `x0` è hardwired a zero. Vivado
 sintetizza tutto in distributed RAM (LUT-RAM), nessun BRAM consumato.
+
+**Write-first** (importante per la pipeline): se nel ciclo corrente WB
+scrive lo stesso registro che ID legge, la lettura ritorna il dato in
+scrittura (bypass combinatorio). Senza, l'hazard WB→ID dello stesso ciclo
+non sarebbe coperto da nessuno — il forwarding alimenta solo l'EX, non l'ID.
 
 ### 4.2 `forwarding_unit.vhd`
 
@@ -310,7 +329,7 @@ Domande probabili e risposte:
 | A — Core multi-cycle | Completata | 9 moduli VHDL, simulazione OK |
 | B — Periferiche UART + GPIO | Completata | Hello World OK in xsim |
 | 3 — Bring-up su scheda | Parziale | Bitstream OK, LED arrivano a 0x55 (CPU completa Hello) ma 0 byte arrivano al PC. Test 3 con `uart_test_top` ha dimostrato che la catena hardware UART funziona, quindi il bug è in `sw → uart_tx_start` (vedi `memory/project_phase3_status.md` per i dettagli) |
-| 4 — Pipeline | Scheletro pronto | 4 file VHDL + 1 testbench scritti. Da: simulare, eventuali bug fix, programma di test con hazard espliciti |
+| 4 — Pipeline | Simulata e funzionante | Portata in simulazione (GHDL): trovati e corretti 4 bug da latenza BRAM + regfile write-first, e refactor "BRAM come registri di pipeline" (4 register canonici). Test auto-verificante `tb_cpu_pipelined_hazard` (PROGRAM_E) PASSA: `led_out=0x004F`. Dettagli in `pipeline_fixes.md`. Aperto: read periferiche in pipeline; conferma in Vivado xsim; bitstream |
 | 5 — Report + demo | Da fare | |
 
 ---

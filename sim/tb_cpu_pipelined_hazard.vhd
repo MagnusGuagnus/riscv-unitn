@@ -95,9 +95,14 @@ begin
                    "Un hazard (forwarding/stall/branch/jal-link) e' rotto."
             severity failure;
 
-        -- 4) Verifica secondaria: PC fermo sul self-loop finale (istr 16).
-        assert dbg_pc = x"040"
-            report "PC dovrebbe essere fermo a 0x040 (jal self-loop istr 16)"
+        -- 4) Verifica secondaria: il fetch PC oscilla nel self-loop del jal
+        --    finale. Con branch risolto in EX, dbg_pc (= pc_if di fetch) corre
+        --    avanti e viene ridiretto a 0x040 ad ogni giro (il commit resta a
+        --    0x040). Accetto quindi la finestra di oscillazione 0x040..0x04C
+        --    invece di un valore esatto: la firma sui LED e' il check vero.
+        assert (dbg_pc = x"040" or dbg_pc = x"044"
+             or dbg_pc = x"048" or dbg_pc = x"04C")
+            report "PC fuori dal self-loop del jal finale (atteso 0x040-0x04C)"
             severity failure;
 
         report "tb_cpu_pipelined_hazard: PASS - firma 0x004F corretta, " &

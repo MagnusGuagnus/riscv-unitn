@@ -2,42 +2,44 @@
 -- Module Name : cpu_top_pipelined - Behavioral
 --
 -- VERSIONE PIPELINED 5-STAGE della CPU RISC-V (estensione architetturale).
+-- Convive con cpu_top.vhd (multi-cycle): si sceglie il top in Vivado.
 --
--- Convive in parallelo con cpu_top.vhd (versione multi-cycle). Scegli quale
--- usare in sintesi con "Set as Top" nel pannello Sources di Vivado, o
--- istanziandone uno o l'altro nel wrapper di board.
+-- ARCHITETTURA (5 stadi, 4 pipeline register canonici)
+-- ====================================================
+--   IF -> ID -> EX -> MEM -> WB
+--   pipeline register: IF/ID, ID/EX, EX/MEM, MEM/WB
 --
--- ARCHITETTURA
--- ============
---   IF  -> ID  -> EX  -> MEM -> WB
---     |     |     |     |     |
---     v     v     v     v     v
---   IF/ID  ID/EX  EX/MEM  MEM/WB     (4 pipeline registers)
+-- NOTA DI PROGETTO IMPORTANTE — le BRAM come registri di pipeline
+-- =============================================================
+-- IMEM e DMEM sono BRAM a LETTURA SINCRONA: il loro output e' gia' un
+-- registro (1 ciclo di latenza). Invece di mettere un SECONDO registro a
+-- valle (che aggiungerebbe stadi nascosti, rompendo lo schema 5-stadi e
+-- introducendo bug di disallineamento), usiamo l'output register della BRAM
+-- COME registro di pipeline:
+--   * l'output della IMEM E' il registro IF/ID per l'istruzione;
+--   * l'output della DMEM E' il registro MEM/WB per il dato di load.
+-- Cio' che la BRAM non porta con se' (il PC dell'istruzione, il bit di
+-- validita') lo registriamo a parte, allineato. Cosi' lo schema resta
+-- esattamente a 4 pipeline register, come da docs/pipeline_overview.md.
 --
---   IF  : PC + IMEM read
---   ID  : decoder + regfile dual-port (2 read async) + immediate_gen
---   EX  : forwarding mux + ALU (uso alu_pre_result combinatorio) + branch
---         resolution (comparator replicato combinatoriamente qui per evitare
---         la latenza del registro interno del modulo comparator esistente)
---   MEM : memory_map (DMEM + UART + GPIO)
---   WB  : mux sorgente writeback (alu_result / mem_out / pc_next per JAL)
---         e scrittura sul regfile dual-port
+-- Conseguenze pratiche di questa scelta:
+--   1. Stall load-use: si congela l'output BRAM IMEM con un read-enable
+--      (re = not stall), non un registro a valle.
+--   2. Flush branch: l'output BRAM non si puo' forzare a NOP, quindi si usa
+--      un bit di validita' (ifid_valid): se '0' il decoder vede una NOP.
+--   3. Load: l'indirizzo DMEM e' quello REGISTRATO dello stadio MEM
+--      (exmem_alu_result); il dato esce in WB ed e' letto LIVE dall'output
+--      della DMEM (mem_out_mem), senza un registro mem_out aggiuntivo.
 --
--- HAZARD GESTITI
--- ==============
---   - Data hazard RAW: forwarding EX/MEM -> EX e MEM/WB -> EX (modulo
---     forwarding_unit). Risolve senza stall.
---   - Load-use hazard: stall di 1 ciclo (modulo hazard_unit) + bolla NOP
---     iniettata in ID/EX.
---   - Control hazard (branch/jump taken): branch risolto in EX, flush
---     dei 2 stadi precedenti (IF/ID e ID/EX -> NOP), redirect PC al
---     branch target. Penalita' = 2 cicli per branch taken.
+-- HAZARD
+-- ======
+--   * RAW: forwarding EX/MEM->EX e MEM/WB->EX (forwarding_unit).
+--   * Load-use: stall di 1 ciclo (hazard_unit) + bolla in ID/EX.
+--   * WB->ID stesso ciclo: gestito dal regfile_dp write-first (bypass).
+--   * Control (branch/jump taken): risolto in EX, flush dei 2 stadi
+--     precedenti, redirect del PC. Penalita' 2 cicli.
 --
--- INTERFACCIA ESTERNA
--- ===================
--- Identica a cpu_top.vhd (multi-cycle) per facilitare lo swap nel wrapper:
--- stessi generic (CLK_HZ/BAUD/PROGRAM_SEL) e stesso port (clk/reset/
--- uart_tx_pin/led_out/sw_in/dbg_*).
+-- INTERFACCIA ESTERNA: identica a cpu_top.vhd (swap nel wrapper di board).
 ----------------------------------------------------------------------------------
 
 library IEEE;
@@ -59,7 +61,7 @@ entity cpu_top_pipelined is
         -- Debug (riusati per simulazione, mostrano lo stato dello stadio EX)
         dbg_pc          : out std_logic_vector(11 downto 0);
         dbg_instr       : out std_logic_vector(31 downto 0);
-        dbg_state       : out std_logic_vector(1 downto 0);   -- placeholder
+        dbg_state       : out std_logic_vector(1 downto 0);
         dbg_alu_result  : out std_logic_vector(31 downto 0);
         dbg_mem_out     : out std_logic_vector(31 downto 0);
         dbg_rd_value    : out std_logic_vector(31 downto 0)
@@ -68,7 +70,6 @@ end cpu_top_pipelined;
 
 architecture Behavioral of cpu_top_pipelined is
 
-    -- Costante NOP (= addi x0, x0, 0) per iniettare bolle e flush
     constant NOP_INSTR : std_logic_vector(31 downto 0) := x"00000013";
 
     --------------------------------------------------------------------
@@ -77,19 +78,23 @@ architecture Behavioral of cpu_top_pipelined is
     signal pc_if         : std_logic_vector(11 downto 0) := (others => '0');
     signal pc_next_if    : std_logic_vector(11 downto 0);
     signal pc_in         : std_logic_vector(11 downto 0);
-    signal instruction_if: std_logic_vector(31 downto 0);
+    signal instruction_if: std_logic_vector(31 downto 0);  -- output BRAM = istruzione IF/ID
     signal pc_word_if    : std_logic_vector(9 downto 0);
     signal pc_write_en   : std_logic;
     signal pc_redirect   : std_logic;       -- '1' se branch/jump taken in EX
     signal pc_target     : std_logic_vector(11 downto 0);
+    signal imem_re       : std_logic;  -- read-enable BRAM IMEM = not stall
 
     --------------------------------------------------------------------
     -- IF/ID PIPELINE REGISTER
+    --   L'istruzione vive nell'output register della BRAM (instruction_if).
+    --   Qui teniamo solo cio' che la BRAM non porta: il PC compagno e il
+    --   bit di validita' (per il flush).
     --------------------------------------------------------------------
-    signal ifid_pc        : std_logic_vector(11 downto 0) := (others => '0');
-    signal ifid_pc_next   : std_logic_vector(11 downto 0) := (others => '0');
-    signal ifid_instr     : std_logic_vector(31 downto 0) := NOP_INSTR;
-    signal ifid_valid     : std_logic := '0';
+    signal pc_if_q     : std_logic_vector(11 downto 0) := (others => '0');
+    signal pc_next_q   : std_logic_vector(11 downto 0) := (others => '0');
+    signal ifid_valid  : std_logic := '0';
+    signal id_instr    : std_logic_vector(31 downto 0);  -- istruzione vista da ID (NOP se non valida)
 
     --------------------------------------------------------------------
     -- ID STAGE
@@ -123,19 +128,17 @@ architecture Behavioral of cpu_top_pipelined is
     signal idex_cond_op   : std_logic_vector(2 downto 0)  := (others => '0');
     signal idex_a_sel     : std_logic := '0';
     signal idex_b_sel     : std_logic := '0';
-
-    -- Comodita': "questa istruzione e' un load?" estratto da op_class(2)
     signal idex_is_load   : std_logic;
 
     --------------------------------------------------------------------
     -- EX STAGE
     --------------------------------------------------------------------
     signal fwd_a, fwd_b      : std_logic_vector(1 downto 0);
-    signal rs1_fwd, rs2_fwd  : std_logic_vector(31 downto 0);  -- dopo forwarding
+    signal rs1_fwd, rs2_fwd  : std_logic_vector(31 downto 0);
     signal alu_a_ex, alu_b_ex: std_logic_vector(31 downto 0);
     signal pc_ex_32          : std_logic_vector(31 downto 0);
-    signal alu_result_ex     : std_logic_vector(31 downto 0);  -- alu_pre_result (combinatorio)
-    signal alu_result_latched: std_logic_vector(31 downto 0);  -- alu_result (latched, non usato)
+    signal alu_result_ex     : std_logic_vector(31 downto 0);
+    signal alu_result_latched: std_logic_vector(31 downto 0);
     signal branch_cond_ex    : std_logic;
     signal branch_taken_ex   : std_logic;
 
@@ -151,15 +154,15 @@ architecture Behavioral of cpu_top_pipelined is
     signal exmem_memwrite   : std_logic := '0';
 
     --------------------------------------------------------------------
-    -- MEM STAGE
+    -- MEM STAGE — l'output della BRAM DMEM (mem_out_mem) e' il dato di load
+    -- dello stadio MEM/WB, letto LIVE in WB. Non serve un registro mem_out.
     --------------------------------------------------------------------
     signal mem_out_mem      : std_logic_vector(31 downto 0);
 
     --------------------------------------------------------------------
-    -- MEM/WB PIPELINE REGISTER
+    -- MEM/WB PIPELINE REGISTER (senza mem_out: lo tiene la BRAM DMEM)
     --------------------------------------------------------------------
     signal memwb_alu_result : std_logic_vector(31 downto 0) := (others => '0');
-    signal memwb_mem_out    : std_logic_vector(31 downto 0) := (others => '0');
     signal memwb_pc_next_32 : std_logic_vector(31 downto 0) := (others => '0');
     signal memwb_rd_addr    : std_logic_vector(4 downto 0)  := (others => '0');
     signal memwb_op_class   : std_logic_vector(4 downto 0)  := (others => '0');
@@ -173,26 +176,20 @@ architecture Behavioral of cpu_top_pipelined is
     --------------------------------------------------------------------
     -- HAZARD / STALL / FLUSH
     --------------------------------------------------------------------
-    signal stall      : std_logic;       -- da hazard_unit (load-use)
-    signal flush_ifid : std_logic;       -- '1' se branch taken in EX
-    signal flush_idex : std_logic;       -- '1' se branch taken in EX (o stall)
+    signal stall      : std_logic;
+    signal flush_ifid : std_logic;
+    signal flush_idex : std_logic;
 
 begin
 
     --==================================================================
     -- IF STAGE
     --==================================================================
-
-    -- PC + 4
-    pc_next_if <= std_logic_vector(unsigned(pc_if) + 4);
-
-    -- Mux PC in: redirect (branch taken) vince su sequential
-    pc_in <= pc_target when pc_redirect = '1' else pc_next_if;
-
-    -- PC e' aggiornato sempre tranne quando stalliamo
+    pc_next_if  <= std_logic_vector(unsigned(pc_if) + 4);
+    pc_in       <= pc_target when pc_redirect = '1' else pc_next_if;
     pc_write_en <= not stall;
+    imem_re     <= not stall;   -- durante lo stall l'output BRAM IMEM tiene il valore
 
-    -- PC register
     process(clk)
     begin
         if rising_edge(clk) then
@@ -204,60 +201,54 @@ begin
         end if;
     end process;
 
-    -- IMEM: lettura sincrona (instruction esce 1 ciclo dopo pc_word_if applicato).
-    -- Equivale a "instruction_if e' l'istruzione del PC del ciclo precedente".
-    -- Nel pipeline schema standard questa latenza e' assorbita dal IF/ID register.
     pc_word_if <= pc_if(11 downto 2);
 
+    -- L'output register di questa BRAM E' il registro IF/ID (lato istruzione).
     u_imem: entity work.instr_memory
-        generic map (
-            PROGRAM_SEL => PROGRAM_SEL
-        )
+        generic map ( PROGRAM_SEL => PROGRAM_SEL )
         port map (
             clk         => clk,
+            re          => imem_re,
             addr        => pc_word_if,
             instruction => instruction_if
         );
 
     --==================================================================
-    -- IF/ID PIPELINE REGISTER
+    -- IF/ID PIPELINE REGISTER (PC compagno + valid)
+    --   L'istruzione e' gia' registrata dalla BRAM. Qui registriamo il PC
+    --   (e PC+4) allineati all'output BRAM, e il bit di validita'.
+    --   reset/flush -> non valido (squash); stall -> congela; else -> avanza.
     --==================================================================
-    -- Controllo: reset -> NOP, flush -> NOP, stall -> congela, altrimenti avanza.
     process(clk)
     begin
         if rising_edge(clk) then
-            if reset = '1' then
-                ifid_pc      <= (others => '0');
-                ifid_pc_next <= (others => '0');
-                ifid_instr   <= NOP_INSTR;
-                ifid_valid   <= '0';
-            elsif flush_ifid = '1' then
-                ifid_pc      <= (others => '0');
-                ifid_pc_next <= (others => '0');
-                ifid_instr   <= NOP_INSTR;
-                ifid_valid   <= '0';
+            if reset = '1' or flush_ifid = '1' then
+                pc_if_q    <= (others => '0');
+                pc_next_q  <= (others => '0');
+                ifid_valid <= '0';
             elsif stall = '1' then
-                -- Congelato: mantiene il valore corrente
-                null;
+                null;  -- congelato (anche la BRAM IMEM e' congelata da re)
             else
-                ifid_pc      <= pc_if;
-                ifid_pc_next <= pc_next_if;
-                ifid_instr   <= instruction_if;
-                ifid_valid   <= '1';
+                pc_if_q    <= pc_if;
+                pc_next_q  <= pc_next_if;
+                ifid_valid <= '1';
             end if;
         end if;
     end process;
 
+    -- Squash: se la slot IF/ID non e' valida (flush/reset) il decoder vede NOP.
+    id_instr <= instruction_if when ifid_valid = '1' else NOP_INSTR;
+
     --==================================================================
     -- ID STAGE
     --==================================================================
-    rs1_addr_id <= ifid_instr(19 downto 15);
-    rs2_addr_id <= ifid_instr(24 downto 20);
-    rd_addr_id  <= ifid_instr(11 downto 7);
+    rs1_addr_id <= id_instr(19 downto 15);
+    rs2_addr_id <= id_instr(24 downto 20);
+    rd_addr_id  <= id_instr(11 downto 7);
 
     u_decoder: entity work.decoder
         port map (
-            instr       => ifid_instr,
+            instr       => id_instr,
             op_class    => op_class_id,
             alu_opcode  => alu_op_id,
             cond_opcode => cond_op_id,
@@ -268,7 +259,7 @@ begin
 
     u_imm: entity work.immediate_gen
         port map (
-            instr    => ifid_instr,
+            instr    => id_instr,
             imm_type => imm_type_id,
             imm_out  => immediate_id
         );
@@ -320,14 +311,14 @@ begin
                 idex_rs1_addr  <= (others => '0');
                 idex_rs2_addr  <= (others => '0');
                 idex_rd_addr   <= (others => '0');
-                idex_op_class  <= (others => '0');  -- tutti zero = NOP (niente regwrite/memwrite/branch)
+                idex_op_class  <= (others => '0');
                 idex_alu_op    <= (others => '0');
                 idex_cond_op   <= (others => '0');
                 idex_a_sel     <= '0';
                 idex_b_sel     <= '0';
             else
-                idex_pc        <= ifid_pc;
-                idex_pc_next   <= ifid_pc_next;
+                idex_pc        <= pc_if_q;      -- PC allineato (vedi IF/ID)
+                idex_pc_next   <= pc_next_q;
                 idex_rs1_value <= rs1_value_id;
                 idex_rs2_value <= rs2_value_id;
                 idex_immediate <= immediate_id;
@@ -372,8 +363,8 @@ begin
 
     -- Mux operandi ALU (a_sel: 0=PC, 1=rs1; b_sel: 0=rs2, 1=imm)
     pc_ex_32 <= x"00000" & idex_pc;
-    alu_a_ex <= pc_ex_32 when idex_a_sel = '0' else rs1_fwd;
-    alu_b_ex <= rs2_fwd  when idex_b_sel = '0' else idex_immediate;
+    alu_a_ex <= pc_ex_32 when idex_a_sel = '0' else rs1_fwd;   -- 0=PC, 1=rs1
+    alu_b_ex <= rs2_fwd  when idex_b_sel = '0' else idex_immediate;  -- 0=rs2, 1=imm
 
     u_alu: entity work.alu
         port map (
@@ -382,21 +373,16 @@ begin
             b              => alu_b_ex,
             alu_opcode     => idex_alu_op,
             alu_pre_result => alu_result_ex,
-            alu_result     => alu_result_latched   -- not used in pipeline
+            alu_result     => alu_result_latched
         );
 
-    --------------------------------------------------------------------
-    -- Comparator combinatorio replicato qui (il modulo work.comparator
-    -- ha output latched, non adatto al branch in EX nello stesso ciclo).
-    --   cond_op_id semantica (uguale a comparator.vhd):
-    --     000 EQ, 001 NEQ, 100 LT signed, 101 GE signed, altri -> 0
-    --------------------------------------------------------------------
+    -- Comparator combinatorio replicato (l'EX risolve il branch nello stesso ciclo)
     process(idex_cond_op, rs1_fwd, rs2_fwd)
         variable sa, sb : signed(31 downto 0);
     begin
         sa := signed(rs1_fwd);
         sb := signed(rs2_fwd);
-        branch_cond_ex <= '0';   -- default
+        branch_cond_ex <= '0';
         case idex_cond_op is
             when "000"  => if sa = sb  then branch_cond_ex <= '1'; end if;
             when "001"  => if sa /= sb then branch_cond_ex <= '1'; end if;
@@ -406,11 +392,8 @@ begin
         end case;
     end process;
 
-    -- Branch taken: B-type con condizione vera OPPURE J-type (sempre)
-    branch_taken_ex <= (idex_op_class(3) and branch_cond_ex)
-                   or  idex_op_class(4);
-
-    -- Quando branch taken, ridirigi il PC al target (= alu_result_ex)
+    branch_taken_ex <= (idex_op_class(3) and branch_cond_ex)  -- B-type con condizione
+                   or  idex_op_class(4);                      -- J-type (sempre)
     pc_redirect <= branch_taken_ex;
     pc_target   <= alu_result_ex(11 downto 0);
     flush_ifid  <= pc_redirect;
@@ -435,25 +418,20 @@ begin
                 exmem_pc_next    <= idex_pc_next;
                 exmem_rd_addr    <= idex_rd_addr;
                 exmem_op_class   <= idex_op_class;
-                -- Controlli precalcolati dal op_class:
-                -- regwrite = O or L or J
-                exmem_regwrite <= idex_op_class(0)
-                              or  idex_op_class(2)
-                              or  idex_op_class(4);
-                -- memwrite = S
-                exmem_memwrite <= idex_op_class(1);
+                exmem_regwrite   <= idex_op_class(0) or idex_op_class(2) or idex_op_class(4);
+                exmem_memwrite   <= idex_op_class(1);
             end if;
         end if;
     end process;
 
     --==================================================================
-    -- MEM STAGE: memory_map (DMEM + UART + GPIO)
+    -- MEM STAGE
+    --   Indirizzo REGISTRATO (stadio MEM): la lettura DMEM sincrona parte qui
+    --   e il dato esce in WB, dove l'output register della BRAM (mem_out_mem)
+    --   fa da registro MEM/WB. Timing comodo (registro -> BRAM).
     --==================================================================
     u_mmap: entity work.memory_map
-        generic map (
-            CLK_HZ => CLK_HZ,
-            BAUD   => BAUD
-        )
+        generic map ( CLK_HZ => CLK_HZ, BAUD => BAUD )
         port map (
             clk         => clk,
             reset       => reset,
@@ -467,21 +445,19 @@ begin
         );
 
     --==================================================================
-    -- MEM/WB PIPELINE REGISTER
+    -- MEM/WB PIPELINE REGISTER (mem_out NON registrato: lo tiene la BRAM DMEM)
     --==================================================================
     process(clk)
     begin
         if rising_edge(clk) then
             if reset = '1' then
                 memwb_alu_result <= (others => '0');
-                memwb_mem_out    <= (others => '0');
                 memwb_pc_next_32 <= (others => '0');
                 memwb_rd_addr    <= (others => '0');
                 memwb_op_class   <= (others => '0');
                 memwb_regwrite   <= '0';
             else
                 memwb_alu_result <= exmem_alu_result;
-                memwb_mem_out    <= mem_out_mem;
                 memwb_pc_next_32 <= x"00000" & exmem_pc_next;
                 memwb_rd_addr    <= exmem_rd_addr;
                 memwb_op_class   <= exmem_op_class;
@@ -491,23 +467,20 @@ begin
     end process;
 
     --==================================================================
-    -- WB STAGE: mux della sorgente del writeback
+    -- WB STAGE
+    --   Load -> output BRAM DMEM letto LIVE (valido in WB);
+    --   Jump -> pc_next (return address); default -> alu_result.
     --==================================================================
-    --   op_class(L) -> mem_out (LW)
-    --   op_class(J) -> pc_next (JAL, return address)
-    --   default     -> alu_result (ALU op)
-    --   (S, B non scrivono il regfile, controllato dal memwb_regwrite)
-    --==================================================================
-    wb_data <= memwb_mem_out    when memwb_op_class(2) = '1'   -- Load
+    wb_data <= mem_out_mem      when memwb_op_class(2) = '1'   -- Load
           else memwb_pc_next_32 when memwb_op_class(4) = '1'   -- Jump
-          else memwb_alu_result;                                 -- ALU op
+          else memwb_alu_result;                                -- ALU
 
     --==================================================================
-    -- DEBUG OUTPUT (per simulazione)
+    -- DEBUG OUTPUT (simulazione)
     --==================================================================
     dbg_pc         <= pc_if;
-    dbg_instr      <= ifid_instr;
-    dbg_state      <= "00";   -- placeholder: la pipeline non ha "stati"
+    dbg_instr      <= id_instr;
+    dbg_state      <= "00";
     dbg_alu_result <= alu_result_ex;
     dbg_mem_out    <= mem_out_mem;
     dbg_rd_value   <= wb_data;
