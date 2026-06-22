@@ -262,6 +262,76 @@ architecture Behavioral of instr_memory is
     );
 
     --------------------------------------------------------------------
+    -- PROGRAM G (PROGRAM_SEL = 6) — test minimo di LUI.
+    -- Costruisce &GPIO_LED con lui/addi (niente DMEM) e accende LED=0xAA.
+    -- Se i LED mostrano 0xAA, l'istruzione LUI appena aggiunta funziona.
+    --   0  lui  x12, 0x10     x12 = 0x00010000
+    --   1  addi x12, x12, 8   x12 = 0x00010008 = &GPIO_LED
+    --   2  addi x6,  x0, 170  x6  = 0xAA
+    --   3  sw   x6,  0(x12)   GPIO_LED <= 0xAA
+    --   4  jal  x0,  0        halt
+    --------------------------------------------------------------------
+    constant PROGRAM_G : rom_t := (
+        0 => x"00010637",   -- lui  x12, 0x10
+        1 => x"00860613",   -- addi x12, x12, 8
+        2 => x"0AA00313",   -- addi x6,  x0, 170
+        3 => x"00662023",   -- sw   x6,  0(x12)
+        4 => x"0000006F",   -- jal  x0,  0
+        others => x"00000013"
+    );
+
+    --------------------------------------------------------------------
+    -- PROGRAM H (PROGRAM_SEL = 7) — "Hello" su UART, indirizzi via lui/addi.
+    -- Nessuna tabella in DMEM: gli indirizzi delle periferiche sono costruiti
+    -- con LUI+ADDI. Per ogni carattere: polling di UART_STATUS bit0 (ready),
+    -- poi sw su UART_DATA. LED 0x0F all'avvio, 0x55 a fine.
+    --   x10=&UART_DATA  x11=&UART_STATUS  x12=&GPIO_LED  x5=char  x7=status
+    --------------------------------------------------------------------
+    constant PROGRAM_H : rom_t := (
+        -- setup indirizzi (tutto a 32 bit, niente DMEM)
+        0  => x"00010537",   -- lui  x10, 0x10        x10 = 0x00010000 (&UART_DATA)
+        1  => x"00450593",   -- addi x11, x10, 4      x11 = 0x00010004 (&UART_STATUS)
+        2  => x"00850613",   -- addi x12, x10, 8      x12 = 0x00010008 (&GPIO_LED)
+        3  => x"00F00313",   -- addi x6,  x0, 15      x6  = 0x0F
+        4  => x"00662023",   -- sw   x6,  0(x12)      LED = 0x0F (vivo)
+        -- 'H' = 72
+        5  => x"04800293",   -- addi x5, x0, 72
+        6  => x"0005A383",   -- lw   x7, 0(x11)       poll
+        7  => x"0013F393",   -- andi x7, x7, 1
+        8  => x"FE038CE3",   -- beq  x7, x0, -8
+        9  => x"00552023",   -- sw   x5, 0(x10)       invia
+        -- 'e' = 101
+        10 => x"06500293",   -- addi x5, x0, 101
+        11 => x"0005A383",   -- lw   x7, 0(x11)
+        12 => x"0013F393",   -- andi x7, x7, 1
+        13 => x"FE038CE3",   -- beq  x7, x0, -8
+        14 => x"00552023",   -- sw   x5, 0(x10)
+        -- 'l' = 108
+        15 => x"06C00293",   -- addi x5, x0, 108
+        16 => x"0005A383",   -- lw   x7, 0(x11)
+        17 => x"0013F393",   -- andi x7, x7, 1
+        18 => x"FE038CE3",   -- beq  x7, x0, -8
+        19 => x"00552023",   -- sw   x5, 0(x10)
+        -- 'l' = 108
+        20 => x"06C00293",   -- addi x5, x0, 108
+        21 => x"0005A383",   -- lw   x7, 0(x11)
+        22 => x"0013F393",   -- andi x7, x7, 1
+        23 => x"FE038CE3",   -- beq  x7, x0, -8
+        24 => x"00552023",   -- sw   x5, 0(x10)
+        -- 'o' = 111
+        25 => x"06F00293",   -- addi x5, x0, 111
+        26 => x"0005A383",   -- lw   x7, 0(x11)
+        27 => x"0013F393",   -- andi x7, x7, 1
+        28 => x"FE038CE3",   -- beq  x7, x0, -8
+        29 => x"00552023",   -- sw   x5, 0(x10)
+        -- fine
+        30 => x"05500313",   -- addi x6, x0, 85       x6 = 0x55
+        31 => x"00662023",   -- sw   x6, 0(x12)       LED = 0x55
+        32 => x"0000006F",   -- jal  x0, 0            halt
+        others => x"00000013"
+    );
+
+    --------------------------------------------------------------------
     -- Function di selezione del programma a partire dal generic.
     -- Restituisce uno dei cinque programmi precaricati a seconda di PROGRAM_SEL.
     --------------------------------------------------------------------
@@ -277,6 +347,10 @@ architecture Behavioral of instr_memory is
             return PROGRAM_E;
         elsif sel = 5 then
             return PROGRAM_F;
+        elsif sel = 6 then
+            return PROGRAM_G;
+        elsif sel = 7 then
+            return PROGRAM_H;
         else
             return PROGRAM_A;
         end if;

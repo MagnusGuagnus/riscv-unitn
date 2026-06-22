@@ -192,7 +192,7 @@ begin
         generic map (
             CLK_HZ      => 100_000_000,
             BAUD        =>     115_200,
-            PROGRAM_SEL =>           5
+            PROGRAM_SEL =>           7
         )
         port map (
             clk            => clk,

@@ -111,6 +111,7 @@ architecture Behavioral of cpu_top_pipelined is
     signal a_sel_id    : std_logic;
     signal b_sel_id    : std_logic;
     signal imm_type_id : std_logic_vector(2 downto 0);
+    signal is_lui_id   : std_logic;
 
     --------------------------------------------------------------------
     -- ID/EX PIPELINE REGISTER
@@ -129,6 +130,7 @@ architecture Behavioral of cpu_top_pipelined is
     signal idex_a_sel     : std_logic := '0';
     signal idex_b_sel     : std_logic := '0';
     signal idex_is_load   : std_logic;
+    signal idex_is_lui    : std_logic := '0';
 
     --------------------------------------------------------------------
     -- EX STAGE
@@ -254,7 +256,8 @@ begin
             cond_opcode => cond_op_id,
             a_sel       => a_sel_id,
             b_sel       => b_sel_id,
-            imm_type    => imm_type_id
+            imm_type    => imm_type_id,
+            is_lui      => is_lui_id
         );
 
     u_imm: entity work.immediate_gen
@@ -316,6 +319,7 @@ begin
                 idex_cond_op   <= (others => '0');
                 idex_a_sel     <= '0';
                 idex_b_sel     <= '0';
+                idex_is_lui    <= '0';
             else
                 idex_pc        <= pc_if_q;      -- PC allineato (vedi IF/ID)
                 idex_pc_next   <= pc_next_q;
@@ -330,6 +334,7 @@ begin
                 idex_cond_op   <= cond_op_id;
                 idex_a_sel     <= a_sel_id;
                 idex_b_sel     <= b_sel_id;
+                idex_is_lui    <= is_lui_id;
             end if;
         end if;
     end process;
@@ -363,7 +368,11 @@ begin
 
     -- Mux operandi ALU (a_sel: 0=PC, 1=rs1; b_sel: 0=rs2, 1=imm)
     pc_ex_32 <= x"00000" & idex_pc;
-    alu_a_ex <= pc_ex_32 when idex_a_sel = '0' else rs1_fwd;   -- 0=PC, 1=rs1
+    -- LUI: alu_a forzato a 0 (qui in EX, fuori dal cammino di lettura del regfile)
+    -- cosi' rd = 0 + immediato_U. Altrimenti: 0=PC, 1=rs1.
+    alu_a_ex <= (others => '0') when idex_is_lui = '1'
+           else pc_ex_32        when idex_a_sel = '0'
+           else rs1_fwd;
     alu_b_ex <= rs2_fwd  when idex_b_sel = '0' else idex_immediate;  -- 0=rs2, 1=imm
 
     u_alu: entity work.alu

@@ -32,7 +32,8 @@ entity decoder is
         cond_opcode : out std_logic_vector(2 downto 0);
         a_sel       : out std_logic;
         b_sel       : out std_logic;
-        imm_type    : out std_logic_vector(2 downto 0)
+        imm_type    : out std_logic_vector(2 downto 0);
+        is_lui      : out std_logic   -- '1' solo per LUI (EX forza alu_a=0)
     );
 end decoder;
 
@@ -58,6 +59,7 @@ architecture Behavioral of decoder is
     constant OPCODE_STORE  : std_logic_vector(6 downto 0) := "0100011";
     constant OPCODE_BRANCH : std_logic_vector(6 downto 0) := "1100011";
     constant OPCODE_JAL    : std_logic_vector(6 downto 0) := "1101111";
+    constant OPCODE_LUI    : std_logic_vector(6 downto 0) := "0110111";
 
     -- Costanti per alu_opcode
     constant ALU_ADD  : std_logic_vector(2 downto 0) := "000";
@@ -72,6 +74,7 @@ architecture Behavioral of decoder is
     constant IMM_S : std_logic_vector(2 downto 0) := "001";
     constant IMM_B : std_logic_vector(2 downto 0) := "010";
     constant IMM_J : std_logic_vector(2 downto 0) := "100";
+    constant IMM_U : std_logic_vector(2 downto 0) := "011";  -- U-type (gia' gestito da immediate_gen)
 begin
     -- Estrai i campi dall'istruzione (sono cablaggi puri, niente logica)
     opcode <= instr(6 downto 0);
@@ -90,6 +93,7 @@ begin
         a_sel       <= '0';
         b_sel       <= '0';
         imm_type    <= IMM_I;
+        is_lui      <= '0';
 
         case opcode is
 
@@ -194,8 +198,21 @@ begin
                 imm_type   <= IMM_J;
 
             ----------------------------------------------------------------
+            -- U-type LUI: rd = imm[31:12] << 12
+            -- LUI non ha rs1: l'ALU calcola 0 + immediato_U leggendo x0 come
+            -- operando A (rs1 forzato a x0 nel cpu_top_pipelined). imm_type = U.
+            ----------------------------------------------------------------
+            when OPCODE_LUI =>
+                op_class   <= OPC_O;     -- scrive rd
+                alu_opcode <= ALU_ADD;   -- rd = a + b  (a forzato a 0 in EX)
+                a_sel      <= '1';
+                b_sel      <= '1';       -- b = immediato
+                imm_type   <= IMM_U;     -- immediato U: instr[31:12] << 12
+                is_lui     <= '1';       -- EX forza alu_a = 0 -> rd = immediato
+
+            ----------------------------------------------------------------
             -- Tutto il resto: opcode sconosciuto → NOP (default già settati).
-            -- Include LUI, AUIPC, JALR, FENCE, SYSTEM, ecc.
+            -- Include AUIPC, JALR, FENCE, SYSTEM, ecc.
             ----------------------------------------------------------------
             when others =>
                 null;
