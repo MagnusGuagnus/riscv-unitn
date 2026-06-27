@@ -332,6 +332,83 @@ architecture Behavioral of instr_memory is
     );
 
     --------------------------------------------------------------------
+    -- PROGRAM I (PROGRAM_SEL = 8) — DEMO "running light" sui LED.
+    -- Una luce che scorre verso sinistra sui 16 LED, con loop di ritardo
+    -- per renderla visibile. Mostra: ALU (add come shift x2), branch
+    -- condizionali, GPIO write, loop di delay annidato. Nessuna periferica
+    -- di lettura, nessuna tabella in DMEM.
+    --
+    --   x12 = &GPIO_LED (lui/addi)   x5 = pattern LED (parte dal bit0)
+    --   x9  = 0x10000 (limite oltre il bit15)   x6 = contatore di ritardo
+    --
+    --   ATTENZIONE: il valore di delay (lui x6,0x40 = 0x40000 iter) e' tarato
+    --   per la simulazione/scheda; aumentalo (es. 0x200) per rallentare la luce.
+    --
+    --   idx label   istruzione                  offset branch/jal (byte)
+    --   4  loop:    sw  x5,0(x12)
+    --   6  delay:   addi x6,x6,-1
+    --   7           bne x6,x0,delay   -> idx6  (-4)
+    --   9           bge x5,x9,reset   -> idx11 (+8)
+    --   10          jal x0,loop       -> idx4  (-24)
+    --   11 reset:   addi x5,x0,1
+    --   12          jal x0,loop       -> idx4  (-32)
+    --------------------------------------------------------------------
+    constant PROGRAM_I : rom_t := (
+        0  => x"00010637",   -- lui  x12, 0x10       x12 = 0x00010000
+        1  => x"00860613",   -- addi x12, x12, 8     x12 = &GPIO_LED (0x10008)
+        2  => x"00100293",   -- addi x5,  x0, 1      x5  = pattern, parte dal bit0
+        3  => x"000104B7",   -- lui  x9,  0x10       x9  = 0x10000 (limite)
+        4  => x"00562023",   -- sw   x5,  0(x12)     loop:  LED <= pattern
+        5  => x"00040337",   -- lui  x6,  0x40       x6  = ritardo (~262k)
+        6  => x"FFF30313",   -- addi x6,  x6, -1     delay: x6--
+        7  => x"FE031EE3",   -- bne  x6,  x0, delay  se x6!=0 ricicla
+        8  => x"005282B3",   -- add  x5,  x5, x5     x5 = x5*2 (shift left 1)
+        9  => x"0092D463",   -- bge  x5,  x9, reset  se x5>=0x10000 -> reset
+        10 => x"FE9FF06F",   -- jal  x0,  loop       continua
+        11 => x"00100293",   -- addi x5,  x0, 1      reset: torna al bit0
+        12 => x"FE1FF06F",   -- jal  x0,  loop       continua
+        others => x"00000013"
+    );
+
+    --------------------------------------------------------------------
+    -- PROGRAM J (PROGRAM_SEL = 9) — DEMO interattiva switch + UART.
+    -- Echo continuo degli switch sui LED; quando lo switch 15 e' alto, manda
+    -- il carattere 'A' su UART (con polling di UART_STATUS). Mostra: lettura
+    -- periferica (GPIO_SW), scrittura periferica (GPIO_LED + UART), test di un
+    -- bit con AND, branch, handshake UART. Entrambe le periferiche.
+    --
+    --   x10=&UART_DATA  x11=&UART_STATUS  x12=&GPIO_LED  x13=&GPIO_SW
+    --   x5=switch  x6=0x8000(bit15)  x7=maschera  x8=status  x9='A'
+    --
+    --   NB: con sw15 alto la 'A' viene inviata di continuo (nessun edge-detect).
+    --
+    --   idx label  istruzione               offset branch/jal (byte)
+    --   4  loop:   lw  x5,0(x13)
+    --   8          beq x7,x0,loop  -> idx4  (-16)
+    --   9  wait:   lw  x8,0(x11)
+    --   11         beq x8,x0,wait  -> idx9  (-8)
+    --   14         jal x0,loop     -> idx4  (-40)
+    --------------------------------------------------------------------
+    constant PROGRAM_J : rom_t := (
+        0  => x"00010537",   -- lui  x10, 0x10       x10 = &UART_DATA (0x10000)
+        1  => x"00450593",   -- addi x11, x10, 4     x11 = &UART_STATUS (0x10004)
+        2  => x"00850613",   -- addi x12, x10, 8     x12 = &GPIO_LED (0x10008)
+        3  => x"00C50693",   -- addi x13, x10, 12    x13 = &GPIO_SW (0x1000C)
+        4  => x"0006A283",   -- lw   x5,  0(x13)     loop: leggi switch
+        5  => x"00562023",   -- sw   x5,  0(x12)     echo sui LED
+        6  => x"00008337",   -- lui  x6,  0x8        x6  = 0x8000 = bit15
+        7  => x"0062F3B3",   -- and  x7,  x5, x6     isola bit15
+        8  => x"FE0388E3",   -- beq  x7,  x0, loop   bit15 spento -> solo echo
+        9  => x"0005A403",   -- lw   x8,  0(x11)     wait: poll UART_STATUS
+        10 => x"00147413",   -- andi x8,  x8, 1      isola bit0 (ready)
+        11 => x"FE040CE3",   -- beq  x8,  x0, wait   non pronto -> aspetta
+        12 => x"04100493",   -- addi x9,  x0, 65     x9 = 'A'
+        13 => x"00952023",   -- sw   x9,  0(x10)     invia 'A'
+        14 => x"FD9FF06F",   -- jal  x0,  loop       ricomincia
+        others => x"00000013"
+    );
+
+    --------------------------------------------------------------------
     -- Function di selezione del programma a partire dal generic.
     -- Restituisce uno dei cinque programmi precaricati a seconda di PROGRAM_SEL.
     --------------------------------------------------------------------
@@ -351,6 +428,10 @@ architecture Behavioral of instr_memory is
             return PROGRAM_G;
         elsif sel = 7 then
             return PROGRAM_H;
+        elsif sel = 8 then
+            return PROGRAM_I;
+        elsif sel = 9 then
+            return PROGRAM_J;
         else
             return PROGRAM_A;
         end if;
